@@ -1,0 +1,405 @@
+---
+name: "Fires_Azerbaijan"
+title: "Fires in Azerbaijan"
+subtitle: <h2>IAMO Leibniz Institute of Agricultural Development in Transition Economies, Max Hofmann, 29.07.2021</h2>
+output:
+  html_document:
+    theme: united
+    toc: true
+    df_print: kable
+    number_sections: false
+    toc_depth: 3
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+---
+<style>
+  h1.title{
+    font-size: 38px !important;
+    color: black !important;
+  }
+  h1{
+    font-size: 30px !important;
+    color: #dd4814 !important;
+  }
+  h2{
+    font-size: 25px !important;
+    color: #808080 !important;
+  }
+  h3{
+    font-size: 20px !important;
+    color: #404040 !important;
+  }
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+&nbsp;
+
+
+***
+
+
+<!-- ## PREPARATIONS -->
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## load packages
+library(leaflet)
+library(leaflet.extras)
+library(magrittr)
+library(raster)
+library(rgdal)
+library(sp)
+library(Kendall)
+library(dplyr)
+library(mapview)
+
+## define root directory
+drive <- "D:"
+
+## define time span to be analysed
+years <- c(2001:2020)
+
+## define color scales for the maps
+colredblue <- colorRampPalette(rev(c("#B2182B","#D6604D","#F4A582","#FDDBC7","#F7F7F7","#D1E5F0","#92C5DE","#4393C3","#2166AC")))
+colramp <- colredblue(100)
+
+colred <- colorRampPalette(rev(c("#B2182B","#D6604D","#F4A582","#FDDBC7")))
+colramp_red <- colred(100)
+```
+
+<!-- ## LOAD AND PRE-PROCESS ADMINISTRATIVE DIVISIONS DATA -->
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## load auxiliary file (we need the coordinate system of this one for correct visualization in leaflet)
+US3 <- readOGR(paste0(drive,"/2021_ERA.Net/select_regions/interactive_maps/2004_Election_Counties.shp"), verbose=FALSE)
+
+## load district borders
+arm_Admin02 <- readOGR(paste0(drive,"/2021_Sparkasse/DATA/country_borders/FINAL_ZONES/easy/Armenia_Regions_easy_500m.shp"), verbose=FALSE)
+aze_Admin02 <- readOGR(paste0(drive,"/2021_Sparkasse/DATA/country_borders/FINAL_ZONES/easy/Azerbaijan_Regions_easy_500m.shp"), verbose=FALSE)
+
+## delete unneeded attribute fields
+arm_Admin02 <- arm_Admin02[,which(names(arm_Admin02)=="NameEng")]
+aze_Admin02 <- aze_Admin02[,which(names(aze_Admin02)=="div_short")]
+
+## reproject
+arm_Admin02 <- spTransform(arm_Admin02, crs(US3))
+aze_Admin02 <- spTransform(aze_Admin02, crs(US3))
+
+## change column names 
+names(arm_Admin02@data) <- "rayon"
+names(aze_Admin02@data) <- "rayon"
+```
+
+
+# Fires on Cropland {.tabset .tabset-fade .tabset-pills}
+
+<!-- ## LOAD AND PRE-PROCESS FIRE DATA -->
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## load MODIS archives
+arm_modis_arc <- readOGR(paste0(drive,"/2021_Sparkasse/DATA/FIRMS/GIS/arm_modis_arc_cropland.shp"), verbose=FALSE)
+aze_modis_arc <- readOGR(paste0(drive,"/2021_Sparkasse/DATA/FIRMS/GIS/aze_modis_arc_cropland.shp"), verbose=FALSE)
+
+### project MODIS data to match CRS of administrative divisions
+arm_modis_arc <- spTransform(arm_modis_arc,crs(arm_Admin02))
+aze_modis_arc <- spTransform(aze_modis_arc,crs(aze_Admin02))
+
+### select only vegetation fires
+arm_modis_arc <- arm_modis_arc[arm_modis_arc$TYPE==0,]
+aze_modis_arc <- aze_modis_arc[aze_modis_arc$TYPE==0,]
+
+### exlude records with confidence < 20%
+arm_modis_arc <- arm_modis_arc[arm_modis_arc$CONFIDENCE>=20,] 
+aze_modis_arc <- aze_modis_arc[aze_modis_arc$CONFIDENCE>=20,]
+
+### create column for year
+arm_modis_arc@data$YEAR <- substr(arm_modis_arc@data$ACQ_DATE,1,4)
+aze_modis_arc@data$YEAR <- substr(aze_modis_arc@data$ACQ_DATE,1,4)
+
+### delete unneeded attribute fields
+arm_modis_arc <- arm_modis_arc[,which(names(arm_modis_arc@data)%in%c("LATITUDE","LONGITUDE","FRP","YEAR"))]
+aze_modis_arc <- aze_modis_arc[,which(names(aze_modis_arc@data)%in%c("LATITUDE","LONGITUDE","FRP","YEAR"))]
+
+### reproject
+arm_modis_arc <- spTransform(arm_modis_arc, crs(US3))
+aze_modis_arc <- spTransform(aze_modis_arc, crs(US3))
+
+# dim(arm_modis_arc@data)
+# dim(aze_modis_arc@data)
+```
+
+<!-- ## Number of fires 2001-2020: AZERBAIJAN, MODIS, Admin02 -->
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+### summarize yearly number of fires by rayon
+aze_count <- data.frame(Var1 = aze_Admin02@data$rayon)
+for (i in 1:length(years))
+{ aze_modis_arc_sel <- aze_modis_arc[aze_modis_arc$YEAR==years[i],]
+  aze_count_temp <- as.data.frame(table(over(aze_modis_arc_sel,aze_Admin02)[,1]))
+  aze_count <- merge(aze_count, aze_count_temp, by = "Var1", all = TRUE)
+  names(aze_count)[i+1] <- years[i] 
+}
+names(aze_count)[1] <- "rayon" 
+
+### replace NAs by zeros
+aze_count <- replace(aze_count, is.na(aze_count), 0)
+
+### calculate trend for each rayon
+aze_count$change <- NA
+aze_count$signif <- NA
+aze_count$signif2 <- "no significant change"
+
+for (i in 1:NROW(aze_count))
+{ #### calculate yearly change in number of fires
+  aze_count$change[i] <- round(summary(lm(unlist(aze_count[i,c(2:(length(years)+1))])~c(1:length(years))))$coefficients[2], digits=2)
+  
+  #### calculate significance of this trend
+  if (sum(aze_count[i,c(2:(length(years)+1))])>0) {
+    teststat <- MannKendall(unlist(aze_count[i,c(2:(length(years)+1))]))
+  
+    #### check against threshold p==0.05 and write result into table
+    if (teststat[2]$sl[1]<0.05) {
+    aze_count$signif[i] <- 1 
+    aze_count$signif2[i] <- "significant change"
+    } else { aze_count$signif[i] <- 0 }}
+}
+
+### calculate yearly mean
+aze_count$mean <- apply(aze_count[,2:21],1,mean)
+
+### create new shapefile with trend in count 
+aze_count_trend <- aze_Admin02
+aze_count_trend@data <- merge(aze_count_trend@data, aze_count[,c(1,22:24)], by = "rayon", all = TRUE, sort=FALSE)
+
+### create new shapefile with mean count 
+aze_count_mean <- aze_Admin02
+aze_count_mean@data <- merge(aze_count_mean@data, aze_count[,c(1,25)], by = "rayon", all = TRUE, sort=FALSE)
+
+### delete unneeded variables
+rm(aze_count_temp, teststat, aze_modis_arc_sel)
+```
+
+<!-- ## Intensity of fires 2001-2020: AZERBAIJAN, MODIS, Admin02 -->
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+### summarize yearly mean Intensity of fires by rayon
+aze_intensity <- data.frame(rayon = aze_Admin02@data$rayon)
+for (i in 1:length(years))
+{ aze_modis_arc_sel <- aze_modis_arc[aze_modis_arc$YEAR==years[i],]
+  aze_modis_arc_sel@data$rayon <- as.factor(over(aze_modis_arc_sel,aze_Admin02)[,1])
+  aze_intensity_temp <- aze_modis_arc_sel@data %>% group_by(rayon) %>% summarise(intensity=mean(FRP))
+  aze_intensity_temp <- as.data.frame(aze_intensity_temp)
+  aze_intensity <- merge(aze_intensity, aze_intensity_temp[which(!is.na(aze_intensity_temp[,1])),], by = "rayon", all = TRUE)
+  names(aze_intensity)[i+1] <- years[i] 
+}
+
+### replace NAs by zeros
+aze_intensity <- replace(aze_intensity, is.na(aze_intensity), 0)
+
+### calculate trend for each rayon
+aze_intensity$change <- NA
+aze_intensity$signif <- NA
+aze_intensity$signif2 <- "no significant change"
+
+for (i in 1:NROW(aze_intensity))
+{ #### calculate yearly change in number of fires
+  aze_intensity$change[i] <- round(summary(lm(unlist(aze_intensity[i,c(2:(length(years)+1))])~c(1:length(years))))$coefficients[2], digits=2)
+  
+  #### calculate significance of this trend
+  if (sum(aze_intensity[i,c(2:(length(years)+1))])>0) {
+    teststat <- MannKendall(unlist(aze_intensity[i,c(2:(length(years)+1))]))
+  
+    #### check against threshold p==0.05 and write result into table
+    if (teststat[2]$sl[1]<0.05) {
+    aze_intensity$signif[i] <- 1 
+    aze_intensity$signif2[i] <- "significant change"
+    } else { aze_intensity$signif[i] <- 0 }}
+}
+
+### calculate overall mean intensity
+aze_modis_arc2 <- aze_modis_arc
+aze_modis_arc2@data$rayon <- as.factor(over(aze_modis_arc2,aze_Admin02)[,1])
+aze_intensity_mean_temp <- aze_modis_arc2@data %>% group_by(rayon) %>% summarise(intensity=mean(FRP))
+aze_intensity_mean_temp <- as.data.frame(aze_intensity_mean_temp)[which(!is.na(aze_intensity_mean_temp[,1])),]
+names(aze_intensity_mean_temp)[2] <- "mean"
+aze_intensity_mean_temp[,2] <- round(aze_intensity_mean_temp[,2], digits=2)
+aze_intensity_mean_temp2 <- aze_Admin02@data
+aze_intensity_mean_temp2 <- merge(aze_intensity_mean_temp2, aze_intensity_mean_temp, by = "rayon", all=TRUE, sort=FALSE)
+
+### create new shapefile with trend in intensity
+aze_intensity_trend <- aze_Admin02
+aze_intensity_trend@data <- merge(aze_intensity_trend@data, aze_intensity[,c(1,22:24)], by = "rayon", all = TRUE, sort=FALSE)
+
+### create new shapefile with mean intensity 
+aze_intensity_mean <- aze_Admin02
+aze_intensity_mean@data <- merge(aze_intensity_mean@data, aze_intensity_mean_temp2, by = "rayon", all = TRUE, sort=FALSE)
+aze_intensity_mean@data$mean <- replace(aze_intensity_mean@data$mean, is.na(aze_intensity_mean@data$mean), 0)
+
+### delete unneeded variables
+rm(aze_intensity_temp, teststat, aze_modis_arc_sel, aze_modis_arc2, aze_intensity_mean_temp2)
+```
+
+## Locations 
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+aze_modis_arc@data %>%
+  leaflet() %>% 
+  addTiles() %>% 
+  addProviderTiles(providers$OpenStreetMap.DE) %>% 
+  setView(median(aze_modis_arc@data$LONGITUDE)-0.5, median(aze_modis_arc@data$LATITUDE), 7) %>%
+  addHeatmap(lng=~LONGITUDE, lat=~LATITUDE, intensity=~FRP, max=100, radius=5, blur=10)
+```
+
+## Mean Yearly Number
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+colkey <- max(abs(min(na.omit(aze_count_mean@data$mean))),abs(max(na.omit(aze_count_mean@data$mean))))
+bins <- seq(from=0,to=colkey,by=(colkey)/10)
+pal <- colorBin(colramp_red, domain = aze_count_mean$value, bins = bins)
+
+legendlabels <- paste(round(bins,digits=0),round(bins[-1],digits=0),sep=" – ")[-11]
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>Average number of fires per year: %g",
+  aze_count_mean$rayon, aze_count_mean$mean
+) %>% lapply(htmltools::HTML)
+
+map1 <- leaflet(options = leafletOptions(minZoom = 0, maxZoom = 14, worldCopyJump = F)) %>%
+  setView(median(aze_modis_arc@data$LONGITUDE)-0.5, median(aze_modis_arc@data$LATITUDE), zoom = 7) %>%
+  setMapWidgetStyle(list(background= "white")) %>%
+
+  addPolygons(data=aze_count_mean,
+    fillColor = ~pal(mean), weight = 1, opacity = 1, color = "white", fillOpacity = 0.9,
+    highlight = highlightOptions(weight = 5, color = "#666", fillOpacity = 1, bringToFront = TRUE),
+    label = labels,
+    labelOptions = labelOptions(style = list("font-weight" = "normal", padding = "3px 8px"), textsize = "15px", direction = "auto")) %>%
+
+  addLegend(data=aze_count_mean, pal = pal, values = ~mean, opacity = 0.9, title = "Average number of <br> fires per year <br> from 2001 to 2020", position = "bottomleft", labFormat = function(type, cuts, p) { paste0(legendlabels) } )
+
+map1
+```
+
+## Change in Number
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+colkey <- max(abs(min(na.omit(aze_count_trend@data$change))),abs(max(na.omit(aze_count_trend@data$change))))
+bins <- c(seq(from=-colkey,to=colkey,by=(colkey*2)/10)[1:5],0,0.001,seq(from=-colkey,to=colkey,by=(colkey*2)/10)[7:11])
+pal <- colorBin(colramp, domain = aze_count_trend$value, bins = bins)
+
+legendlabels <- paste(round(bins,digits=1),round(bins[-1],digits=1),sep=" – ")
+legendlabels[6] <- 0 
+
+aze_count_trend_signif <- aze_count_trend[which(aze_count_trend$signif==1),]
+aze_count_trend_nonsignif <- aze_count_trend[-which(aze_count_trend$signif==1),]
+
+labels_signif <- sprintf(
+  "<strong>%s</strong><br/>Average change of %g fires per year<br/><i>%s</i>",
+  aze_count_trend_signif$rayon, aze_count_trend_signif$change, aze_count_trend_signif$signif2
+) %>% lapply(htmltools::HTML)
+
+labels_nonsignif <- sprintf(
+  "<strong>%s</strong><br/>Average change of %g fires per year<br/><i>%s</i>",
+  aze_count_trend_nonsignif$rayon, aze_count_trend_nonsignif$change, aze_count_trend_nonsignif$signif2 
+) %>% lapply(htmltools::HTML)
+
+map2 <- leaflet(options = leafletOptions(minZoom = 0, maxZoom = 14, worldCopyJump = F)) %>%
+  setView(median(aze_modis_arc@data$LONGITUDE)-0.5, median(aze_modis_arc@data$LATITUDE), zoom = 7) %>%
+  setMapWidgetStyle(list(background= "white")) %>%
+  
+  addPolygons(data=aze_count_trend_nonsignif,
+    fillColor = ~pal(change), weight = 1, opacity = 1, color = "white", fillOpacity = 0.9,
+    highlight = highlightOptions(weight = 5, color = "#666", fillOpacity = 1, bringToFront = TRUE, sendToBack = TRUE),
+    label = labels_nonsignif,
+    labelOptions = labelOptions(style = list("font-weight" = "normal", padding = "3px 8px"), textsize = "15px", direction = "auto")) %>%
+  
+  addPolygons(data=aze_count_trend_signif,
+    fillColor = ~pal(change), weight = 2, opacity = 1, color = "black", fillOpacity = 0.9, 
+    highlight = highlightOptions(weight = 5, color = "#666", fillOpacity = 1, bringToFront = TRUE),
+    label = labels_signif,
+    labelOptions = labelOptions(style = list("font-weight" = "normal", padding = "3px 8px"), textsize = "15px", direction = "auto")) %>%
+  
+  addLegend(data=aze_count_trend, pal = pal, values = ~change, opacity = 0.9, title = "Average change <br> in number of fires <br> per year <br> from 2001 to 2020", position = "bottomleft", labFormat = function(type, cuts, p) { paste0(legendlabels) } )
+
+map2
+```
+
+## Mean Intensity
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+colkey <- max(abs(min(na.omit(aze_intensity_mean@data$mean))),abs(max(na.omit(aze_intensity_mean@data$mean))))
+bins <- seq(from=0,to=colkey,by=(colkey)/10)
+pal <- colorBin(colramp_red, domain = aze_intensity_mean$value, bins = bins)
+
+legendlabels <- paste(round(bins,digits=0),round(bins[-1],digits=0),sep=" – ")[-11]
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>Average intensity per fire: %g MW",
+  aze_intensity_mean$rayon, aze_intensity_mean$mean
+) %>% lapply(htmltools::HTML)
+
+map3 <- leaflet(options = leafletOptions(minZoom = 0, maxZoom = 14, worldCopyJump = F)) %>%
+  setView(median(aze_modis_arc@data$LONGITUDE)-0.5, median(aze_modis_arc@data$LATITUDE), zoom = 7) %>%
+  setMapWidgetStyle(list(background= "white")) %>%
+
+  addPolygons(data=aze_intensity_mean,
+    fillColor = ~pal(mean), weight = 1, opacity = 1, color = "white", fillOpacity = 0.9,
+    highlight = highlightOptions(weight = 5, color = "#666", fillOpacity = 1, bringToFront = TRUE),
+    label = labels,
+    labelOptions = labelOptions(style = list("font-weight" = "normal", padding = "3px 8px"), textsize = "15px", direction = "auto")) %>%
+
+  addLegend(data=aze_intensity_mean, pal = pal, values = ~mean, opacity = 0.9, title = "Average intensity <br> per fire in MW <br> from 2001 to 2020", position = "bottomleft", labFormat = function(type, cuts, p) { paste0(legendlabels) } )
+
+map3
+```
+
+## Change in Intensity 
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+colkey <- max(abs(min(na.omit(aze_intensity_trend@data$change))),abs(max(na.omit(aze_intensity_trend@data$change))))
+bins <- c(seq(from=-colkey,to=colkey,by=(colkey*2)/10)[1:5],0,0.001,seq(from=-colkey,to=colkey,by=(colkey*2)/10)[7:11])
+pal <- colorBin(colramp, domain = aze_intensity_trend$value, bins = bins)
+
+legendlabels <- paste(round(bins,digits=1),round(bins[-1],digits=1),sep=" – ")
+legendlabels[6] <- 0 
+
+aze_intensity_trend_signif <- aze_intensity_trend[which(aze_intensity_trend$signif==1),]
+aze_intensity_trend_nonsignif <- aze_intensity_trend[-which(aze_intensity_trend$signif==1),]
+
+labels_signif <- sprintf(
+  "<strong>%s</strong><br/>Average change of %g MW per year<br/><i>%s</i>",
+  aze_intensity_trend_signif$rayon, aze_intensity_trend_signif$change, aze_intensity_trend_signif$signif2
+) %>% lapply(htmltools::HTML)
+
+labels_nonsignif <- sprintf(
+  "<strong>%s</strong><br/>Average change of %g MW per year<br/><i>%s</i>",
+  aze_intensity_trend_nonsignif$rayon, aze_intensity_trend_nonsignif$change, aze_intensity_trend_nonsignif$signif2 
+) %>% lapply(htmltools::HTML)
+
+map4 <- leaflet(options = leafletOptions(minZoom = 0, maxZoom = 14, worldCopyJump = F)) %>%
+  setView(median(aze_modis_arc@data$LONGITUDE)-0.5, median(aze_modis_arc@data$LATITUDE), zoom = 7) %>%
+  setMapWidgetStyle(list(background= "white")) %>%
+  
+  addPolygons(data=aze_intensity_trend_nonsignif,
+    fillColor = ~pal(change), weight = 1, opacity = 1, color = "white", fillOpacity = 0.9,
+    highlight = highlightOptions(weight = 5, color = "#666", fillOpacity = 1, bringToFront = TRUE, sendToBack = TRUE),
+    label = labels_nonsignif,
+    labelOptions = labelOptions(style = list("font-weight" = "normal", padding = "3px 8px"), textsize = "15px", direction = "auto")) %>%
+  
+  addPolygons(data=aze_intensity_trend_signif,
+    fillColor = ~pal(change), weight = 2, opacity = 1, color = "black", fillOpacity = 0.9, 
+    highlight = highlightOptions(weight = 5, color = "#666", fillOpacity = 1, bringToFront = TRUE),
+    label = labels_signif,
+    labelOptions = labelOptions(style = list("font-weight" = "normal", padding = "3px 8px"), textsize = "15px", direction = "auto")) %>%
+  
+  addLegend(data=aze_intensity_trend, pal = pal, values = ~change, opacity = 0.9, title = "Average change <br> in fire intensity <br> in MW per year <br> from 2001 to 2020 <br> ", position = "bottomleft", labFormat = function(type, cuts, p) { paste0(legendlabels) } )
+
+map4
+```
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+mapshot(map1, file = "D:/2021_Sparkasse/DATA/AZE_firms_number_mean.png", vwidth=700, vheight=500)
+mapshot(map2, file = "D:/2021_Sparkasse/DATA/AZE_firms_number_change.png", vwidth=700, vheight=500)
+mapshot(map3, file = "D:/2021_Sparkasse/DATA/AZE_firms_intensity_mean.png", vwidth=700, vheight=500)
+mapshot(map4, file = "D:/2021_Sparkasse/DATA/AZE_firms_intensity_change.png", vwidth=700, vheight=500)
+```
+
+
+
+```{r}
+```
+
